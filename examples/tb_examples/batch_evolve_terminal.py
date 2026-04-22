@@ -110,6 +110,8 @@ def _solve_one_task(
     system_prompt_text: str | None = None,
     skill_agent=None,
     propose_skill: bool = False,
+    solver_base_url: str | None = None,
+    solver_api_key: str = "dummy",
 ) -> dict:
     """Solve a single task. Returns a result dict with all info needed for
     both JSONL output and observation collection."""
@@ -286,16 +288,32 @@ def _solve_one_task(
             skill_draft = react_result.skill_draft  # v15: solver-proposed skill
         else:
             from strands import Agent
-            from strands.models import BedrockModel
 
-            bedrock_model = BedrockModel(
-                model_id=model_id,
-                region_name=region,
-                max_tokens=max_tokens,
-            )
+            if solver_base_url:
+                from strands.models import OpenAIModel
+
+                solver_strands_model = OpenAIModel(
+                    model_id=model_id,
+                    client_args={
+                        "base_url": solver_base_url,
+                        "api_key": solver_api_key,
+                    },
+                    params={"max_tokens": max_tokens},
+                )
+                task_log.info("Solver backend: OpenAI-compatible @ %s", solver_base_url)
+            else:
+                from strands.models import BedrockModel
+
+                solver_strands_model = BedrockModel(
+                    model_id=model_id,
+                    region_name=region,
+                    max_tokens=max_tokens,
+                )
+                task_log.info("Solver backend: Bedrock region=%s", region)
+
             tools = [task_bash, task_python, task_submit]
             agent = Agent(
-                model=bedrock_model,
+                model=solver_strands_model,
                 system_prompt=system_prompt,
                 tools=tools,
             )
@@ -669,7 +687,21 @@ def main():
     # Model / solver
     p.add_argument("--model-id", type=str,
                    default="us.anthropic.claude-opus-4-6-v1",
-                   help="Bedrock model ID")
+                   help="Fallback model ID for both solver and evolver "
+                        "(used when --solver-model / --evolver-model are not set)")
+    p.add_argument("--solver-model", type=str, default=None,
+                   help="Solver model. Defaults to --model-id. For a vLLM endpoint, "
+                        "pair with --solver-base-url.")
+    p.add_argument("--evolver-model", type=str, default=None,
+                   help="Evolver model. Defaults to --model-id. Prefix with "
+                        "'claude-code:' to route through a Claude Code subscription "
+                        "(requires `claude-agent-sdk` and a logged-in `claude` CLI).")
+    p.add_argument("--solver-base-url", type=str, default=None,
+                   help="OpenAI-compatible base URL for solver (e.g. http://localhost:8000/v1). "
+                        "When set, the strands solver uses OpenAIModel instead of BedrockModel. "
+                        "Only affects --solver strands (the react solver stays on Bedrock).")
+    p.add_argument("--solver-api-key", type=str, default="dummy",
+                   help="API key for the solver endpoint. vLLM typically accepts any string.")
     p.add_argument("--region", type=str, default="us-west-2", help="AWS region")
     p.add_argument("--max-tokens", type=int, default=16384,
                    help="Max tokens per model response")
@@ -789,6 +821,10 @@ def main():
                 print_metrics(metrics)
         return
 
+    # ── Resolve solver/evolver models (fall back to --model-id) ───
+    solver_model = args.solver_model or args.model_id
+    evolver_model = args.evolver_model or args.model_id
+
     # ── Prepare workspace ─────────────────────────────────────────
     work_dir = Path(args.work_dir)
     seed_dir = Path(args.seed_workspace)
@@ -806,7 +842,7 @@ def main():
 
     agent = TerminalAgent(
         workspace_dir=work_dir,
-        model_id=args.model_id,
+        model_id=solver_model,
         region=args.region,
         max_tokens=args.max_tokens,
     )
@@ -816,7 +852,7 @@ def main():
     observer = Observer(evolution_dir)
 
     config = EvolveConfig(
-        evolver_model=args.model_id,
+        evolver_model=evolver_model,
         trajectory_only=args.trajectory_only,
         evolve_prompts=not args.skills_only and not args.prompt_only,
         evolve_skills=not args.prompt_only,
@@ -869,7 +905,7 @@ def main():
             pool.submit(
                 _solve_one_task,
                 t,
-                args.model_id,
+                solver_model,
                 args.region,
                 args.max_tokens,
                 args.log_dir,
@@ -879,6 +915,8 @@ def main():
                 system_prompt_text,
                 _task_agent,
                 _propose,
+                args.solver_base_url,
+                args.solver_api_key,
             ): t
             for t in batch
         }

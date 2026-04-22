@@ -53,6 +53,11 @@ def create_default_llm(config: EvolveConfig) -> LLMProvider:
     """Create the default LLM provider based on the evolver_model config string."""
     model = config.evolver_model
 
+    if model.startswith("claude-code:"):
+        from ...llm.claude_code import ClaudeCodeProvider
+
+        return ClaudeCodeProvider(model=model.split(":", 1)[1])
+
     if "." in model and ("anthropic" in model or "amazon" in model or "meta" in model):
         from ...llm.bedrock import BedrockProvider
 
