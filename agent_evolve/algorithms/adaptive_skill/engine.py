@@ -151,26 +151,36 @@ class AdaptiveSkillEngine(EvolutionEngine):
         }
 
     def _run_llm(self, prompt: str, workspace_root: Path) -> dict[str, Any]:
-        """Run the evolver LLM with bash access to the workspace."""
+        """Run the evolver LLM with file-edit access to the workspace.
+
+        Tries the uniform ``converse_loop`` entry point first. BedrockProvider
+        consumes ``tools``/``tool_executor``; ClaudeCodeProvider uses ``cwd``
+        to scope its built-in file tools. Providers without tool support raise
+        NotImplementedError and we fall back to a tool-less ``complete()`` with
+        a warning — the workspace won't mutate in that cycle, matching the
+        old behavior instead of silently failing.
+        """
         bash_fn = make_workspace_bash(workspace_root)
 
         try:
-            from ...llm.bedrock import BedrockProvider
-
-            if isinstance(self.llm, BedrockProvider):
-                response = self.llm.converse_loop(
-                    system_prompt=DEFAULT_EVOLVER_SYSTEM_PROMPT,
-                    user_message=prompt,
-                    tools=[BASH_TOOL_SPEC],
-                    tool_executor={"workspace_bash": lambda command: bash_fn(command)},
-                    max_tokens=self.config.evolver_max_tokens,
-                )
-                return {
-                    "content": response.content,
-                    "usage": response.usage,
-                }
-        except ImportError:
-            pass
+            response = self.llm.converse_loop(
+                system_prompt=DEFAULT_EVOLVER_SYSTEM_PROMPT,
+                user_message=prompt,
+                tools=[BASH_TOOL_SPEC],
+                tool_executor={"workspace_bash": lambda command: bash_fn(command)},
+                cwd=workspace_root,
+                max_tokens=self.config.evolver_max_tokens,
+            )
+            return {
+                "content": response.content,
+                "usage": response.usage,
+            }
+        except NotImplementedError:
+            logger.warning(
+                "%s has no converse_loop; falling back to tool-less complete(). "
+                "Workspace WILL NOT be mutated this cycle.",
+                type(self.llm).__name__,
+            )
 
         messages = [
             LLMMessage(role="system", content=DEFAULT_EVOLVER_SYSTEM_PROMPT),

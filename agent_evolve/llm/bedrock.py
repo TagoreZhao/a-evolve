@@ -81,8 +81,9 @@ class BedrockProvider(LLMProvider):
         self,
         system_prompt: str,
         user_message: str,
-        tools: list[dict[str, Any]],
-        tool_executor: dict[str, Any],
+        tools: list[dict[str, Any]] | None = None,
+        tool_executor: dict[str, Any] | None = None,
+        cwd: Any = None,
         max_tokens: int = 16384,
         max_turns: int = 50,
     ) -> LLMResponse:
@@ -95,6 +96,8 @@ class BedrockProvider(LLMProvider):
             user_message: Initial user message.
             tools: Tool definitions in Bedrock format.
             tool_executor: Dict mapping tool names to callable functions.
+            cwd: Unused on Bedrock — accepted for signature uniformity with
+                providers whose built-in tools are scoped by working directory.
             max_tokens: Max tokens per turn.
             max_turns: Safety limit on conversation turns.
 

@@ -52,7 +52,7 @@ The workspace follows a standard directory structure:
 Your job each cycle:
 1. Review the DETAILED ANALYSIS provided — includes per-claim failures, task-type performance, and judge feedback patterns.
 2. Make TARGETED, EVIDENCE-BASED changes. Focus on the weakest claim types and task types.
-3. Use the provided bash tool to read/write files in the workspace.
+3. Use the file-edit tools available to you (Bash, Read, Write, Edit, or workspace_bash) to read/write files in the workspace.
 4. Verify changes with `git diff` before finishing.
 
 ## CRITICAL CONSTRAINTS

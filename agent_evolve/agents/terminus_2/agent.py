@@ -84,6 +84,96 @@ def _restore_all_prompts() -> None:
             logger.warning("Failed to restore %s: %s", template_path, exc)
 
 
+_TOOL_CONTENT_CAP = 4000
+
+
+def _normalize_harbor_trajectory(steps: list[dict]) -> list[dict]:
+    """Convert Harbor's ATIF-v1.6 steps into a conversation the evolver parsers
+    can read.
+
+    The adaptive-skill parsers in ``agent_evolve/algorithms/adaptive_skill/prompts.py``
+    read only ``msg["role"]``, ``msg["tool_calls"][*]["function"]``,
+    ``tc["arguments"]["cmd"|"command"|"code"]``, ``tc["arguments"]["answer"]``,
+    and tool-message ``content`` (scanned for error substrings). This helper
+    emits exactly those fields. We are not trying to match ReAct's canonical
+    message shape byte-for-byte — only to give the evolver the signals it
+    needs so the evolution logic runs identically on both paths.
+
+    Harbor batches N commands per agent step with a single combined observation
+    blob. We emit one assistant message carrying all tool_calls, then one
+    ``role: "tool"`` message holding the combined blob; this preserves every
+    command, every error substring, and the submit signal.
+    """
+    out: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        source = step.get("source")
+        message = step.get("message") or ""
+
+        if source == "user":
+            out.append({"role": "user", "content": message})
+            continue
+
+        if source != "agent":
+            continue
+
+        tool_calls_in = step.get("tool_calls") or []
+        tool_calls_out: list[dict] = []
+        for tc in tool_calls_in:
+            if not isinstance(tc, dict):
+                continue
+            fn_name = tc.get("function_name") or ""
+            args_in = tc.get("arguments") or {}
+            if not isinstance(args_in, dict):
+                args_in = {}
+
+            if fn_name == "bash_command":
+                function = "bash"
+                keystrokes = args_in.get("keystrokes") or ""
+                cmd = keystrokes.rstrip("\n")
+                canonical_args = {"cmd": cmd}
+                if "duration" in args_in:
+                    canonical_args["duration"] = args_in["duration"]
+            elif fn_name == "mark_task_complete":
+                function = "submit"
+                canonical_args = {"answer": "DONE"}
+            else:
+                function = fn_name
+                canonical_args = dict(args_in)
+
+            tool_calls_out.append({
+                "function": function,
+                "arguments": canonical_args,
+            })
+
+        asst: dict = {"role": "assistant", "content": message}
+        if tool_calls_out:
+            asst["tool_calls"] = tool_calls_out
+        out.append(asst)
+
+        if not tool_calls_out:
+            continue
+
+        obs = step.get("observation") or {}
+        results = obs.get("results") if isinstance(obs, dict) else None
+        if not isinstance(results, list) or not results:
+            continue
+        combined = "".join(
+            (r.get("content") or "") if isinstance(r, dict) else str(r)
+            for r in results
+        )
+        if not combined:
+            continue
+        if len(combined) > _TOOL_CONTENT_CAP:
+            combined = combined[: _TOOL_CONTENT_CAP // 2] \
+                + "\n...[truncated]...\n" \
+                + combined[-_TOOL_CONTENT_CAP // 2 :]
+        out.append({"role": "tool", "content": combined})
+
+    return out
+
+
 @dataclass
 class HarborTerminus2Config:
     solver_model: str
@@ -294,15 +384,31 @@ class HarborTerminus2Agent(BaseAgent):
         }
 
         exception_info = result.get("exception_info")
-        eval_output_lines = [
+        summary_lines = [
             f"task={result.get('task_name')}",
             f"trial={result.get('trial_name')}",
             f"score={score}",
             f"episodes={meta.get('n_episodes')}",
         ]
         if exception_info:
-            eval_output_lines.append(f"exception={json.dumps(exception_info)[:500]}")
-        eval_output = "\n".join(eval_output_lines)
+            summary_lines.append(f"exception={json.dumps(exception_info)[:500]}")
+        summary = "\n".join(summary_lines)
+
+        # Prefer the real verifier stdout — that's what ReAct's
+        # container.run_tests_with_retry returns into eval_output, so using it
+        # here keeps feedback_detail diagnostic on both paths.
+        verifier_text = ""
+        stdout_path = trial_dir / "verifier" / "test-stdout.txt"
+        if stdout_path.is_file():
+            try:
+                verifier_text = stdout_path.read_text(errors="replace")
+            except Exception as exc:  # pragma: no cover
+                logger.warning("Failed to read verifier stdout: %s", exc)
+        eval_output = (
+            verifier_text.rstrip() + "\n\n---\n" + summary
+            if verifier_text.strip()
+            else summary
+        )
 
         conversation: list[dict] = []
         traj_path = trial_dir / "agent" / "trajectory.json"
@@ -311,7 +417,7 @@ class HarborTerminus2Agent(BaseAgent):
                 traj = json.loads(traj_path.read_text())
                 steps = traj.get("steps") if isinstance(traj, dict) else traj
                 if isinstance(steps, list):
-                    conversation = [s for s in steps if isinstance(s, dict)]
+                    conversation = _normalize_harbor_trajectory(steps)
             except Exception as exc:  # pragma: no cover
                 logger.warning("Failed to parse trajectory.json: %s", exc)
 

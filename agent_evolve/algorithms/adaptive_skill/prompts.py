@@ -25,7 +25,7 @@ Your job each cycle:
 2. Review draft skills -- refine into real skills, merge with existing, or discard
 3. Improve the system prompt if needed
 4. Update memory with high-level insights, prune redundant entries
-5. Use the provided bash tool to read/write files in the workspace
+5. Use the file-edit tools available to you (Bash, Read, Write, Edit, or workspace_bash) to read/write files in the workspace
 6. Verify your changes with `git diff` before finishing
 
 Guidelines:
@@ -496,7 +496,7 @@ ones the agent will actually choose to read and benefit from.
 - Verification steps that prove a task category is solved
 - Common domain-specific pitfalls and how to avoid them
 
-Use the workspace_bash tool to read/write files. Verify with `git diff`."""
+Use the available file-edit tools (Bash, Read, Write, Edit, or workspace_bash) to read/write files. Verify with `git diff`."""
 
 
 def _build_prompt_only_instructions() -> str:
@@ -524,7 +524,7 @@ failure, then add concise strategy rules to the system prompt.
 2. ADD at most 3-5 short rules (one line each) per evolution cycle. Do not rewrite the prompt.
 3. Keep total prompt under 2000 characters. Brevity is critical — every extra character dilutes attention.
 4. Rules must be GENERAL (apply to many task types), not specific to any one task.
-5. Use the workspace_bash tool to read/write files.
+5. Use the available file-edit tools (Bash, Read, Write, Edit, or workspace_bash) to read/write files.
 6. Verify your changes with `git diff` before finishing."""
 
 
@@ -560,7 +560,7 @@ For each draft:
 - If no draft contains generalizable knowledge for a category, leave that skill unchanged.
 {skill_budget_note}
 5. **Do NOT modify prompts/system.md.** The base prompt is optimal. Only update skills.
-6. Use the workspace_bash tool to read/write files in the workspace.
+6. Use the available file-edit tools (Bash, Read, Write, Edit, or workspace_bash) to read/write files in the workspace.
 7. Verify your changes with `git diff` before finishing. Confirm skills did not shrink.
 
 **FORBIDDEN — do NOT keep any of the following in skills (the agent already knows these):**
@@ -584,5 +584,5 @@ def _build_standard_instructions() -> str:
 2. Review draft skills -- decide: refine into a real skill, merge with existing, or discard
 3. Review current skills -- any need updating based on new evidence?
 4. Review memory -- prune redundant entries, add high-level insights
-5. Use the workspace_bash tool to read/write files in the workspace
+5. Use the available file-edit tools (Bash, Read, Write, Edit, or workspace_bash) to read/write files in the workspace
 6. Verify your changes with `git diff` before finishing"""

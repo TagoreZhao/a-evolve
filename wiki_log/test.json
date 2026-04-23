@@ -1,0 +1,56 @@
+{
+  "game_id": "test",
+  "pages": {
+    "game_rules": {
+      "content": "\n--- [1] ---\nACTION1=up",
+      "length": 23
+    },
+    "breakthroughs": {
+      "content": "",
+      "length": 0
+    },
+    "colors": {
+      "content": "0=wall",
+      "length": 6
+    },
+    "current_level": {
+      "content": "",
+      "length": 0
+    },
+    "current_plan": {
+      "content": "",
+      "length": 0
+    },
+    "solved_levels": {
+      "content": "",
+      "length": 0
+    },
+    "failed_attempts": {
+      "content": "\n--- [2] ---\ntried going left, hit wall",
+      "length": 39
+    },
+    "level_changes": {
+      "content": "",
+      "length": 0
+    }
+  },
+  "history": [
+    {
+      "op": "write",
+      "page": "colors",
+      "content": "0=wall"
+    },
+    {
+      "op": "append",
+      "page": "game_rules",
+      "seq": 1,
+      "content": "ACTION1=up"
+    },
+    {
+      "op": "append",
+      "page": "failed_attempts",
+      "seq": 2,
+      "content": "tried going left, hit wall"
+    }
+  ]
+}
