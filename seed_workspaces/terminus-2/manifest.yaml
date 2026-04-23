@@ -1,0 +1,13 @@
+name: harbor-terminus-2-agent
+version: 0.1.0
+contract_version: "1.0"
+
+agent:
+  type: reference
+  entrypoint: agent_evolve.agents.terminus_2.HarborTerminus2Agent
+
+evolvable_layers:
+  - prompts
+  - skills
+
+reload_strategy: hot

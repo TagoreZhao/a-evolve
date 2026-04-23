@@ -48,6 +48,13 @@ sys.setrecursionlimit(4000)
 from agent_evolve.agents.terminal.agent import TerminalAgent, _extract_conversation
 from agent_evolve.agents.terminal.dataset import load_all_tasks, TB2Task
 from agent_evolve.agents.terminal.docker_env import TB2Container, pull_image
+from agent_evolve.agents.terminus_2 import HarborTerminus2Agent
+from agent_evolve.agents.terminus_2.agent import (
+    DEFAULT_HARBOR_CLI,
+    DEFAULT_HARBOR_TEMPLATE,
+    DEFAULT_META_HARNESS_DIR,
+    HarborTerminus2Config,
+)
 from agent_evolve.algorithms.adaptive_skill import AdaptiveSkillEngine
 from agent_evolve.algorithms.mas_adaptive_skill import MasAdaptiveSkillEngine
 from agent_evolve.config import EvolveConfig
@@ -440,6 +447,99 @@ def _solve_one_task(
                 pass
 
 
+def _solve_one_task_harbor(
+    task: TB2Task,
+    harbor_agent: HarborTerminus2Agent,
+    log_dir: str,
+    output_file: str,
+    errors_file: str,
+) -> dict:
+    """Solve a single task using Harbor's Terminus-2 via subprocess.
+
+    Harbor owns the Docker lifecycle, the LLM call, and the grading.
+    We just invoke it and package the result in the same shape as
+    `_solve_one_task` so the evolver observation code is unchanged.
+    """
+    task_name = task.name
+    t0 = time.time()
+    task_log, task_log_dir = _setup_task_logger(task_name, log_dir)
+    task_log.info("=" * 60)
+    task_log.info("Task:       %s", task_name)
+    task_log.info("Solver:     harbor_terminus2")
+    task_log.info("Harbor CLI: %s", harbor_agent.cfg.harbor_cli)
+    task_log.info("Jobs dir:   %s", harbor_agent.cfg.jobs_dir)
+    task_log.info("=" * 60)
+
+    task_obj = Task(id=task.name, input=task.prompt, metadata=task.metadata)
+
+    try:
+        trajectory = harbor_agent.solve(task_obj)
+    except Exception as exc:
+        elapsed = time.time() - t0
+        err_msg = str(exc)[:500]
+        task_log.error("Harbor solve raised: %s", err_msg)
+        _write_result(errors_file, {"task_name": task_name, "error": err_msg})
+        result = {
+            "task_name": task_name,
+            "passed": False,
+            "eval_output": f"ERROR: {err_msg}",
+            "model_name_or_path": harbor_agent.cfg.solver_model,
+            "usage": {},
+            "solve_time": elapsed,
+            "total_time": elapsed,
+            "conversation_turns": 0,
+            "conversation": [],
+            "metadata": task.metadata,
+            "status": "error",
+        }
+        _write_result(output_file, result)
+        return result
+
+    step = trajectory.steps[0] if trajectory.steps else {}
+    passed = bool(step.get("passed"))
+    eval_output = step.get("eval_output", "") or trajectory.output or ""
+    usage = step.get("usage", {}) or {}
+    solve_elapsed = float(step.get("elapsed_sec") or (time.time() - t0))
+    elapsed = time.time() - t0
+
+    if task_log_dir:
+        (task_log_dir / "result.txt").write_text(
+            f"passed={passed}\nharbor_trial_dir={step.get('harbor_trial_dir')}\n\n"
+            f"{eval_output}"
+        )
+        try:
+            (task_log_dir / "conversation.json").write_text(
+                json.dumps(trajectory.conversation, indent=2, ensure_ascii=False, default=str)
+            )
+        except Exception as exc:  # pragma: no cover
+            task_log.warning("Failed to write conversation.json: %s", exc)
+
+    if step.get("harbor_stderr_tail"):
+        task_log.info("Harbor stderr tail:\n%s", step["harbor_stderr_tail"])
+    task_log.info(
+        "Result: %s (score=%s, episodes=%s, elapsed=%.1fs)",
+        "PASS" if passed else "FAIL",
+        step.get("score"), (usage or {}).get("n_episodes"), elapsed,
+    )
+
+    result = {
+        "task_name": task_name,
+        "passed": passed,
+        "eval_output": eval_output[-2000:] if len(eval_output) > 2000 else eval_output,
+        "model_name_or_path": harbor_agent.cfg.solver_model,
+        "usage": usage,
+        "solve_time": solve_elapsed,
+        "total_time": elapsed,
+        "conversation_turns": len(trajectory.conversation),
+        "conversation": trajectory.conversation,
+        "metadata": task.metadata,
+        "status": "passed" if passed else ("error" if step.get("error") else "failed"),
+        "harbor_trial_dir": step.get("harbor_trial_dir"),
+    }
+    _write_result(output_file, result)
+    return result
+
+
 def _run_agent_with_timeout(agent, prompt: str, timeout_sec: int, task_log, container=None):
     import concurrent.futures
 
@@ -705,8 +805,33 @@ def main():
     p.add_argument("--region", type=str, default="us-west-2", help="AWS region")
     p.add_argument("--max-tokens", type=int, default=16384,
                    help="Max tokens per model response")
-    p.add_argument("--solver", type=str, default="react", choices=["react", "strands"],
-                   help="Solver: 'react' (standalone ReAct, recommended) or 'strands'")
+    p.add_argument("--solver", type=str, default="react",
+                   choices=["react", "strands", "harbor_terminus2"],
+                   help="Solver: 'react' (standalone ReAct, Bedrock), 'strands', or "
+                        "'harbor_terminus2' (spawn Harbor's stock Terminus-2 via subprocess — "
+                        "the baseline used for meta-harness Terminus-2 evals).")
+    p.add_argument("--harbor-cli", type=str, default=None,
+                   help="Path to Harbor CLI executable (the metaharness env's `harbor`). "
+                        "Default: /home/gost/miniconda3/envs/metaharness/bin/harbor. "
+                        "Only used with --solver harbor_terminus2.")
+    p.add_argument("--harbor-template-path", type=str, default=None,
+                   help="Path to Harbor's Terminus-2 prompt template file. The workspace "
+                        "prompt is staged over this file and restored on exit. "
+                        "Default: the terminus-json-plain.txt in the metaharness env's harbor pkg.")
+    p.add_argument("--meta-harness-dir", type=str, default=None,
+                   help="Path to the meta-harness repo root (appended to Harbor's PYTHONPATH). "
+                        "Default: /home/gost/repo/meta-harness.")
+    p.add_argument("--harbor-timeout-sec", type=float, default=3600.0,
+                   help="Wall-clock per-task timeout for `harbor run`. Default 3600.")
+    p.add_argument("--harbor-override-timeout-sec", type=float, default=600.0,
+                   help="Passed to Terminus-2 as override_timeout_sec. Default 600.")
+    p.add_argument("--harbor-force-build", action="store_true", default=False,
+                   help="Pass environment.force_build=true to Harbor (rebuild Docker images).")
+    p.add_argument("--harbor-env-file", type=str, default=None,
+                   help="Path to an env file forwarded to `harbor run --env-file`. "
+                        "Default: <meta-harness-dir>/configs/evals/agents/agent_env.env if present. "
+                        "The baseline run uses this file to set OPENAI_API_BASE=http://172.17.0.1:29413/v1 "
+                        "so in-container LLM calls reach vLLM via the Docker bridge.")
     # Execution
     p.add_argument("--workers", type=int, default=2,
                    help="Number of parallel workers for solving")
@@ -873,6 +998,41 @@ def main():
     # Also store the agent for per-task prompt building
     _task_agent = agent
 
+    # ── Harbor Terminus-2 solver (optional) ───────────────────────
+    harbor_agent: HarborTerminus2Agent | None = None
+    if args.solver == "harbor_terminus2":
+        if not args.solver_base_url:
+            print("ERROR: --solver harbor_terminus2 requires --solver-base-url "
+                  "(e.g. http://localhost:29413/v1).")
+            sys.exit(2)
+        harbor_jobs_dir = Path(args.work_dir).resolve().parent / "harbor_jobs"
+        meta_dir = args.meta_harness_dir or DEFAULT_META_HARNESS_DIR
+        env_file = args.harbor_env_file
+        if env_file is None:
+            default_env = Path(meta_dir) / "configs" / "evals" / "agents" / "agent_env.env"
+            if default_env.is_file():
+                env_file = str(default_env)
+        harbor_cfg = HarborTerminus2Config(
+            solver_model=solver_model,
+            solver_base_url=args.solver_base_url,
+            solver_api_key=args.solver_api_key,
+            harbor_cli=args.harbor_cli or DEFAULT_HARBOR_CLI,
+            harbor_template_path=args.harbor_template_path or DEFAULT_HARBOR_TEMPLATE,
+            meta_harness_dir=meta_dir,
+            jobs_dir=str(harbor_jobs_dir),
+            log_archive_dir=str(Path(args.log_dir).resolve()),
+            per_task_timeout_sec=args.harbor_timeout_sec,
+            override_timeout_sec=args.harbor_override_timeout_sec,
+            force_build=args.harbor_force_build,
+            env_file=env_file,
+        )
+        harbor_agent = HarborTerminus2Agent(workspace_dir=work_dir, config=harbor_cfg)
+        print(f"Harbor CLI:       {harbor_cfg.harbor_cli}")
+        print(f"Harbor template:  {harbor_cfg.harbor_template_path}")
+        print(f"Harbor jobs dir:  {harbor_cfg.jobs_dir}")
+        print(f"Meta-harness dir: {harbor_cfg.meta_harness_dir}")
+        print(f"Harbor env file:  {harbor_cfg.env_file or '(none)'}")
+
     # ── Split into batches ────────────────────────────────────────
     batch_size = args.batch_size or len(tasks)
     batches = [tasks[i:i + batch_size] for i in range(0, len(tasks), batch_size)]
@@ -901,25 +1061,38 @@ def main():
         pool = ThreadPoolExecutor(max_workers=args.workers)
         # Only propose skills during evolution phase (not --no-evolve eval)
         _propose = args.propose_skill and not args.no_evolve
-        futures = {
-            pool.submit(
-                _solve_one_task,
-                t,
-                solver_model,
-                args.region,
-                args.max_tokens,
-                args.log_dir,
-                args.output,
-                args.errors,
-                args.solver,
-                system_prompt_text,
-                _task_agent,
-                _propose,
-                args.solver_base_url,
-                args.solver_api_key,
-            ): t
-            for t in batch
-        }
+        if harbor_agent is not None:
+            futures = {
+                pool.submit(
+                    _solve_one_task_harbor,
+                    t,
+                    harbor_agent,
+                    args.log_dir,
+                    args.output,
+                    args.errors,
+                ): t
+                for t in batch
+            }
+        else:
+            futures = {
+                pool.submit(
+                    _solve_one_task,
+                    t,
+                    solver_model,
+                    args.region,
+                    args.max_tokens,
+                    args.log_dir,
+                    args.output,
+                    args.errors,
+                    args.solver,
+                    system_prompt_text,
+                    _task_agent,
+                    _propose,
+                    args.solver_base_url,
+                    args.solver_api_key,
+                ): t
+                for t in batch
+            }
 
         try:
             for future in as_completed(futures):
